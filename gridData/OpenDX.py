@@ -178,15 +178,18 @@ class DXclass(object):
         self.component = None   # component type
         self.D = None      # dimensions
 
-    def write(self,file,optstring="",quote=False):
+    def write(self,file,optstring="",quote=False, gz=False):
         """write the 'object' line; additional args are packed in string"""
         classid = str(self.id)
         if quote: classid = '"'+classid+'"'
         # Only use a *single* space between tokens; both chimera's and pymol's DX parser
         # does not properly implement the OpenDX specs and produces garbage with multiple
         # spaces. (Chimera 1.4.1, PyMOL 1.3)
-        file.write('object '+classid+' class '+str(self.name)+' '+\
-                   optstring+'\n')
+        to_write = 'object '+classid+' class '+str(self.name)+' '+\
+                   optstring+'\n'
+        if gz:
+            to_write = to_write.encode()
+        file.write(to_write)
 
     def read(self,file):
         raise NotImplementedError('Reading is currently not supported.')
@@ -228,12 +231,19 @@ class gridpositions(DXclass):
             # anything more complicated
             raise NotImplementedError('Only regularly spaced grids allowed, '
                                       'not delta={}'.format(self.delta))
-    def write(self,file):
-        DXclass.write(self,file,
-                      ('counts '+self.ndformat(' %d')) % tuple(self.shape))
-        file.write('origin %f %f %f\n' % tuple(self.origin))
+    def write(self, file, gz=False):
+        to_write = ('counts '+self.ndformat(' %d')) % tuple(self.shape)
+        DXclass.write(self, file, to_write, False, gz)
+        to_write = 'origin %f %f %f\n' % tuple(self.origin)
+        if gz:
+            to_write = to_write.encode()
+        file.write(to_write)
         for delta in self.delta:
-            file.write(('delta '+self.ndformat(' %f')+'\n') % tuple(delta))
+            to_write = ('delta '+self.ndformat(' %f')+'\n') % tuple(delta)
+            if gz:
+                to_write = to_write.encode()
+            file.write(to_write)
+
     def edges(self):
         """Edges of the grid cells, origin at centre of 0,0,..,0 grid cell.
 
@@ -252,9 +262,10 @@ class gridconnections(DXclass):
         self.name = 'gridconnections'
         self.component = 'connections'
         self.shape = numpy.asarray(shape)      # D dimensional shape
-    def write(self,file):
-        DXclass.write(self,file,
-                      ('counts '+self.ndformat(' %d')) % tuple(self.shape))
+
+    def write(self,file, gz=False):
+        to_write = ('counts '+self.ndformat(' %d')) % tuple(self.shape)
+        DXclass.write(self, file, to_write, False, gz)
 
 class array(DXclass):
     """OpenDX array class.
@@ -351,7 +362,7 @@ class array(DXclass):
             self.type = type
         self.typequote = typequote
 
-    def write(self, file):
+    def write(self, file, gz=False):
         """Write the *class array* section.
 
         Parameters
@@ -371,9 +382,10 @@ class array(DXclass):
                               "Use the type=<type> keyword argument.").format(
                                   self.type, list(self.dx_types.keys())))
         typelabel = (self.typequote+self.type+self.typequote)
-        DXclass.write(self,file,
-                      'type {0} rank 0 items {1} data follows'.format(
-                          typelabel, self.array.size))
+
+        to_write = 'type {0} rank 0 items {1} data follows'.format(
+                          typelabel, self.array.size)
+        DXclass.write(self, file, to_write, False, gz)
         # grid data, serialized as a C array (z fastest varying)
         # (flat iterator is equivalent to: for x: for y: for z: grid[x,y,z])
         # VMD's DX reader requires exactly 3 values per line
@@ -386,12 +398,26 @@ class array(DXclass):
         while 1:
             try:
                 for i in range(values_per_line):
-                    file.write(fmt_string.format(next(values)) + "\t")
-                file.write('\n')
+                    to_write = fmt_string.format(next(values)) + "\t"
+                    if gz:
+                        to_write = to_write.encode()
+                    file.write(to_write)
+                if gz:
+                    to_write = '\n'.encode()
+                else:
+                    to_write = '\n'
+                file.write(to_write)
             except StopIteration:
-                file.write('\n')
+                if gz:
+                    to_write = '\n'.encode()
+                else:
+                    to_write = '\n'
+                file.write(to_write)
                 break
-        file.write('attribute "dep" string "positions"\n')
+        to_write = 'attribute "dep" string "positions"\n'
+        if gz:
+            to_write = to_write.encode()
+        file.write(to_write)
 
 class field(DXclass):
     """OpenDX container class
@@ -460,7 +486,14 @@ class field(DXclass):
         self.components = components
         self.comments= comments
 
-    def write(self, filename):
+    def _openfile(self, filename, gz):
+        """Returns a regular or gz file descriptor"""
+        if gz:
+            return gzip.open(filename, 'wb')
+        else:
+            return open(filename, 'w')
+
+    def write(self, filename, gz=False):
         """Write the complete dx object to the file.
 
         This is the simple OpenDX format which includes the data into
@@ -472,17 +505,23 @@ class field(DXclass):
         """
         # comments (VMD chokes on lines of len > 80, so truncate)
         maxcol = 80
-        with open(str(filename), 'w') as outfile:
+        with self._openfile(str(filename), gz) as outfile:
             for line in self.comments:
                 comment = '# '+str(line)
-                outfile.write(comment[:maxcol]+'\n')
+                to_write = comment[:maxcol]+'\n'
+                if gz:
+                    to_write = to_write.encode()
+                outfile.write(to_write)
             # each individual object
             for component,object in self.sorted_components():
-                object.write(outfile)
+                object.write(outfile, gz)
             # the field object itself
-            DXclass.write(self,outfile,quote=True)
+            DXclass.write(self, outfile, quote=True, gz=gz)
             for component,object in self.sorted_components():
-                outfile.write('component "%s" value %s\n' % (component,str(object.id)))
+                to_write = 'component "%s" value %s\n' % (component,str(object.id))
+                if gz:
+                    to_write = to_write.encode()
+                outfile.write(to_write)
 
     def read(self, file, gz=False):
         """Read DX field from file.
